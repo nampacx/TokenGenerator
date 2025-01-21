@@ -1,13 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace TokenGenerator;
 
-namespace TokenGenerator
+public class DirectLinePayload
 {
-    public class DirectLinePayload
-    {
-        public string conversationId { get; set; }
-        public string token { get; set; }
-        public int expires_in { get; set; }
-    }
+    public string conversationId { get; set; }
+    public string token { get; set; }
+    public int expires_in { get; set; }
 }

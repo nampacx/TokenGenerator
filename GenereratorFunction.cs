@@ -1,65 +1,94 @@
-using System;
-using System.IO;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Security.Claims;
-using TokenGenerator;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
+using System.Net.Http.Headers;
+using System.Security.Claims;
+using System.Text.Json;
+using System.Text;
+using Microsoft.Extensions.Configuration;
 
-namespace HseTokenGenerator
+namespace TokenGenerator;
+
+public partial class TokenGenerator
 {
-    public static class TokenGenerator
+    private readonly ILogger<TokenGenerator> _logger;
+    private readonly string _secret;
+    private readonly string _appSecret;
+    private readonly string _directLineUri;
+
+    public TokenGenerator(ILogger<TokenGenerator> logger, IConfiguration configuration)
     {
-        [FunctionName("GenereratorFunction")]
-        public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = null)] HttpRequest req,
-            ILogger log)
+        _logger = logger;
+        _secret = configuration.GetValue<string>("secret");
+        _appSecret = configuration.GetValue<string>("appSecret");
+        _directLineUri = configuration.GetValue<string>("directLineUri");
+    }
+
+    [Function("TokenGenerator")]
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "get")] HttpRequest req)
+    {
+        try
         {
-            using (HttpClient client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("WEBCHAT_SECRET"));
-                client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-                HttpResponseMessage response = await client.PostAsync(Environment.GetEnvironmentVariable("DirectLineUri"), null);
-
-                var token = GenerateToken(JsonConvert.DeserializeObject<DirectLinePayload>(await response.Content.ReadAsStringAsync()));
-                return new OkObjectResult(token);
-            }
+            ValidateConfiguration();
+        }
+        catch (ArgumentException ex)
+        {
+            _logger.LogError(ex.Message);
+            return new BadRequestObjectResult(ex.Message);
         }
 
-        private static string GenerateToken(DirectLinePayload payload, int expireMinutes = 200)
+        using HttpClient client = new();
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _secret);
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        HttpResponseMessage response = client.PostAsync(_directLineUri, null).Result;
+        string responseContent = response.Content.ReadAsStringAsync().Result;
+        var payload = JsonSerializer.Deserialize<DirectLinePayload>(responseContent);
+        return new OkObjectResult(GenerateToken(payload));
+
+    }
+
+    private void ValidateConfiguration()
+    {
+        if (string.IsNullOrEmpty(_secret))
         {
-            var symmetricKey = Encoding.UTF8.GetBytes(Environment.GetEnvironmentVariable("APP_SECRET"));
-            var tokenHandler = new JwtSecurityTokenHandler();
 
-            var now = DateTime.UtcNow;
-            var tokenDescriptor = new SecurityTokenDescriptor
-            {
-                Subject = new ClaimsIdentity(new[]
-                        {
-                        new Claim("userId", Guid.NewGuid().ToString()),
-                        new Claim("userName", "you"),
-                        new Claim("connectorToken",payload.token),
-                    }),
-
-                Expires = now.AddMinutes(Convert.ToInt32(expireMinutes)),
-
-                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(symmetricKey), SecurityAlgorithms.HmacSha256Signature)
-            };
-
-            var stoken = tokenHandler.CreateToken(tokenDescriptor);
-            var token = tokenHandler.WriteToken(stoken);
-
-            return token;
+            throw new ArgumentException("The 'secret' configuration value is not set.");
         }
+
+        if (string.IsNullOrEmpty(_appSecret))
+        {
+            throw new ArgumentException("The 'appSecret' configuration value is not set.");
+        }
+
+        if (string.IsNullOrEmpty(_directLineUri))
+        {
+            throw new ArgumentException("The 'directLineUri' configuration value is not set.");
+        }
+    }
+
+    private string GenerateToken(DirectLinePayload payload, int expireMinutes = 200)
+    {
+        var symmetricKey = Encoding.UTF8.GetBytes(_appSecret);
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var now = DateTime.UtcNow;
+        var tokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(
+            [
+            new Claim("userId", Guid.NewGuid().ToString()),
+            new Claim("userName", "you"),
+            new Claim("connectorToken", payload.token),
+            ]),
+            Expires = now.AddMinutes(expireMinutes),
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(symmetricKey), SecurityAlgorithms.HmacSha256Signature)
+        };
+
+        var token = tokenHandler.CreateToken(tokenDescriptor);
+        return tokenHandler.WriteToken(token);
     }
 }
